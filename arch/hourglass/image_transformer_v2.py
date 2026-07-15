@@ -414,7 +414,8 @@ class NeighborhoodSelfAttentionBlock(nn.Module):
         qkv = self.qkv_proj(x)
         if natten is None:
             raise ModuleNotFoundError("natten is required for neighborhood attention")
-        if natten.has_fused_na():
+        # NATTEN 0.21 removed has_fused_na() and exposes only the fused na2d API.
+        if not hasattr(natten, "has_fused_na") or natten.has_fused_na():
             q, k, v = rearrange(qkv, "n h w (t nh e) -> t n h w nh e", t=3, e=self.d_head)
             q, k = scale_for_cosine_sim(q, k, self.scale[:, None], 1e-6)
             theta = self.pos_emb(pos)

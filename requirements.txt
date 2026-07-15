@@ -1,0 +1,7 @@
+huggingface-hub>=0.24.0
+packaging>=23.0
+realesrgan>=0.2.5
+torch-fidelity>=0.3.0
+torch-ema>=0.3
+pytorch-lightning>=2.4.0
+timm>=1.0.7

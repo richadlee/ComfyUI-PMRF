@@ -1,172 +1,129 @@
-import pkg_resources
-import subprocess
-import sys
-import huggingface_hub
-import importlib.util
 import importlib.metadata
-import folder_paths
+import importlib.util
 import os
 import pathlib
-from packaging.version import Version
-import time
+import platform
+import subprocess
+import sys
 
-pmrf_path = os.path.join(folder_paths.models_dir, "pmrf")
-pmrf_model_path = os.path.join(pmrf_path, "model.safetensors")
-pmrf_model_json_path = os.path.join(pmrf_path, "config.json")
-if not (os.path.exists(pmrf_model_path) and os.path.exists(pmrf_model_json_path)):
-    print("Downloading PMRF model from ohayonguy/PMRF_blind_face_image_restoration...")
-    if not os.path.exists(pmrf_path):
-        os.makedirs(pmrf_path)
-    huggingface_hub.snapshot_download(
-        repo_id="ohayonguy/PMRF_blind_face_image_restoration",
-        local_dir=pmrf_path,
-    )
-upscale_models_path = os.path.join(folder_paths.models_dir, "upscale_models")
-models = ["RealESRGAN_x2plus.pth", "RealESRGAN_x4plus.pth"]
-for model in models:
-    realesrgan_path = os.path.join(upscale_models_path, model)
-    if not os.path.exists(realesrgan_path):
-        print(f"Downloading {model} model from 2kpr/Real-ESRGAN...")
-        huggingface_hub.snapshot_download(
-            repo_id="2kpr/Real-ESRGAN",
-            allow_patterns=model,
-            local_dir=upscale_models_path,
+import folder_paths
+import torch
+from huggingface_hub import snapshot_download
+
+
+NATTEN_WHEEL_INDEX = "https://whl.natten.org"
+NATTEN_BUILDS = {
+    ("2.5", "12.1"): "0.17.5+torch250cu121",
+    ("2.7", "12.6"): "0.21.0+torch270cu126",
+}
+
+
+def ensure_download_directory(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+    except PermissionError as error:
+        raise PermissionError(
+            f"PMRF cannot create its model directory: {path}. "
+            "Make the ComfyUI runtime user the owner of this directory before startup."
+        ) from error
+
+
+def ensure_models():
+    pmrf_path = os.path.join(folder_paths.models_dir, "pmrf")
+    pmrf_model_path = os.path.join(pmrf_path, "model.safetensors")
+    pmrf_config_path = os.path.join(pmrf_path, "config.json")
+
+    if not (os.path.isfile(pmrf_model_path) and os.path.isfile(pmrf_config_path)):
+        print("[PMRF] Downloading restoration model...")
+        ensure_download_directory(pmrf_path)
+        snapshot_download(
+            repo_id="ohayonguy/PMRF_blind_face_image_restoration",
+            allow_patterns=["model.safetensors", "config.json"],
+            local_dir=pmrf_path,
         )
 
-packages = [
-    {"name": "realesrgan", "version": "0.2.5"},
-    {"name": "torchvision", "version": "0.19.0"},
-    {"name": "torch_fidelity", "version": "0.3.0"},
-    {"name": "torch_ema", "version": "0.3"},
-    {"name": "pytorch_lightning", "version": "2.4.0"},
-    {"name": "timm", "version": "1.0.7"},    
-]
-
-for package in packages:
-    if importlib.util.find_spec(package["name"]):
-        #print(f'Found package {package["name"]}')
-        #print(f'Version: {package["version"]}')
-        #print(f'Version: {importlib.metadata.version(package["name"])}')
-        if Version(package["version"]) > Version(importlib.metadata.version(package["name"])):
-            print(f'Updating {package["name"]} for PMRF...')
-            subprocess.check_call([sys.executable, "-m", "pip", "install", f'{package["name"]}>={package["version"]}', "--upgrade"])
-    else:
-        print(f'Installing {package["name"]} for PMRF...')
-        subprocess.check_call([sys.executable, "-m", "pip", "install", f'{package["name"]}>={package["version"]}', "--upgrade"])
-
-if importlib.util.find_spec("basicsr"):
-    path = pathlib.Path(importlib.util.find_spec("basicsr").origin).parent.joinpath("data/degradations.py")
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-        if "from torchvision.transforms.functional_tensor import rgb_to_grayscale" in content:
-            print(f"Patching basicsr with fix from https://github.com/XPixelGroup/BasicSR/pull/650 for PMRF...")
-            content = content.replace(
-                "from torchvision.transforms.functional_tensor import rgb_to_grayscale",
-                "from torchvision.transforms.functional import rgb_to_grayscale",
+    upscale_models_path = os.path.join(folder_paths.models_dir, "upscale_models")
+    ensure_download_directory(upscale_models_path)
+    for model_name in ("RealESRGAN_x2plus.pth", "RealESRGAN_x4plus.pth"):
+        model_path = os.path.join(upscale_models_path, model_name)
+        if not os.path.isfile(model_path):
+            print(f"[PMRF] Downloading {model_name}...")
+            snapshot_download(
+                repo_id="2kpr/Real-ESRGAN",
+                allow_patterns=model_name,
+                local_dir=upscale_models_path,
             )
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
 
-if not importlib.util.find_spec("natten"):
-    print(f'Installing natten for PMRF...')
-    cuda_version = ""
-    torch_version = ""
-    print("Searching for CUDA and Torch versions for installing atten needed by PMRF...")
-    for p in pkg_resources.working_set:
-        if p.project_name.startswith("nvidia-cuda-runtime"):
-            if p.version.startswith("12.4"):
-                cuda_version = "cu124"
-                print("- Found CUDA 12.4")
-            elif p.version.startswith("12.1"):
-                cuda_version = "cu121"
-                print("- Found CUDA 12.1")
-            elif p.version.startswith("11.8"):
-                cuda_version = "cu118"
-                print("- Found CUDA 11.8")
-        elif p.project_name == "torch":
-            if p.version.startswith("2.4"):
-                torch_version = "torch240"
-                print("- Found Torch 2.4")
-            elif p.version.startswith("2.3"):
-                torch_version = "torch230"
-                print("- Found Torch 2.3")
-            elif p.version.startswith("2.2"):
-                torch_version = "torch220"
-                print("- Found Torch 2.2")
-            elif p.version.startswith("2.1"):
-                torch_version = "torch210"
-                print("- Found Torch 2.1")
-    if cuda_version == "":
-        py_path = os.path.join(folder_paths.temp_directory, "torchcudaversion.py")
-        if not os.path.exists(py_path):
-            if not os.path.exists(folder_paths.temp_directory):
-                os.makedirs(folder_paths.temp_directory)
-            with open(py_path, "w", encoding="utf-8") as f:
-                f.write("import torch\nprint(torch.version.cuda)")
-            cuda_version = subprocess.check_output([sys.executable, f"{py_path}"]).decode().strip()
-        if cuda_version == "12.4":
-            cuda_version = "cu124"
-            print("- Found CUDA 12.4")
-        elif cuda_version == "12.1":
-            cuda_version = "cu121"
-            print("- Found CUDA 12.1")
-        elif cuda_version == "11.8":
-            cuda_version = "cu118"
-            print("- Found CUDA 11.8")
-    if cuda_version == "":
-        print("************************************")
-        print("Error: Can't find CUDA runtime version, can't install natten")
-        print("       PMRF will not work until natten is installed, see https://github.com/SHI-Labs/NATTEN for help in installing natten.")
-        print("************************************")
-        time.sleep(4)
-    elif torch_version == "":
-        print("************************************")
-        print("Error: Can't find torch version, can't install natten")
-        print("       PMRF will not work until natten is installed, see https://github.com/SHI-Labs/NATTEN for help in installing natten.")
-        print("************************************")
-        time.sleep(4)
-    elif cuda_version == "cu124" and torch_version != "torch240":
-        print("************************************")
-        print("Error: Can't install natten, which is needed by PMRF since CUDA runtime version is 12.4 but torch is not version 2.4")
-        print("       PMRF will not work until natten is installed, see https://github.com/SHI-Labs/NATTEN for help in installing natten.")
-        print("************************************")
-        time.sleep(4)
-    elif os.name == "nt" and cuda_version != "cu124":
-        print("************************************")
-        print("Error: Can't install natten on windows if CUDA runtime version is not 12.4 unless you build natten yourself, see https://github.com/SHI-Labs/NATTEN/blob/main/docs/install.md#build-with-msvc")
-        print("       PMRF will not work until natten is installed, see https://github.com/SHI-Labs/NATTEN for help in installing natten.")
-        print("************************************")
-        time.sleep(4)
-    elif os.name == "nt" and torch_version != "torch240":
-        print("************************************")
-        print("Error: Can't install natten on windows if torch version is not 2.4 unless you build natten yourself, see https://github.com/SHI-Labs/NATTEN/blob/main/docs/install.md#build-with-msvc")
-        print("       PMRF will not work until natten is installed, see https://github.com/SHI-Labs/NATTEN for help in installing natten.")
-        print("************************************")
-        time.sleep(4)
-    elif os.name == "nt" and (sys.version_info[1] < 10 or sys.version_info[1] > 12):
-        print("************************************")
-        print("Error: Can't install natten on windows if python version isn't 3.10, 3.11, or 3.12, unless you build natten yourself, see https://github.com/SHI-Labs/NATTEN/blob/main/docs/install.md#build-with-msvc")
-        print("       PMRF will not work until natten is installed, see https://github.com/SHI-Labs/NATTEN for help in installing natten.")
-        print("************************************")
-        time.sleep(4)
-    elif os.name == "nt":
-        if sys.version_info[1] == 10:
-            whl = "natten-0.17.2.dev0-py310-none-win_amd64.whl"
-        elif sys.version_info[1] == 11:
-            whl = "natten-0.17.2.dev0-py311-none-win_amd64.whl"
-        elif sys.version_info[1] == 12:
-            whl = "natten-0.17.2.dev0-py312-none-win_amd64.whl"
-        whl_path = os.path.join(folder_paths.temp_directory, whl)
-        if not os.path.exists(whl_path):
-            if not os.path.exists(folder_paths.temp_directory):
-                os.makedirs(folder_paths.temp_directory)
-            print(f"Downloading {whl} from 2kpr/NATTEN-Windows...")
-            huggingface_hub.snapshot_download(
-                repo_id="2kpr/NATTEN-Windows",
-                allow_patterns=whl,
-                local_dir=folder_paths.temp_directory,
-            )
-        subprocess.check_call([sys.executable, "-m", "pip", "install", f"{whl_path}"])
-    else:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", f"natten==0.17.1+{torch_version}{cuda_version}", "-f", "https://shi-labs.com/natten/wheels/"])
+
+def patch_basicsr():
+    basicsr_spec = importlib.util.find_spec("basicsr")
+    if basicsr_spec is None or basicsr_spec.origin is None:
+        return
+
+    path = pathlib.Path(basicsr_spec.origin).parent / "data" / "degradations.py"
+    if not path.exists():
+        return
+
+    old_import = "from torchvision.transforms.functional_tensor import rgb_to_grayscale"
+    new_import = "from torchvision.transforms.functional import rgb_to_grayscale"
+    content = path.read_text(encoding="utf-8")
+    if old_import in content:
+        print("[PMRF] Patching BasicSR for modern torchvision...")
+        path.write_text(content.replace(old_import, new_import), encoding="utf-8")
+
+
+def ensure_natten():
+    torch_version = torch.__version__.split("+", 1)[0]
+    torch_series = ".".join(torch_version.split(".")[:2])
+    cuda_version = torch.version.cuda
+
+    if platform.system() != "Linux" or platform.machine() not in {"x86_64", "AMD64"}:
+        raise RuntimeError(
+            "This PMRF fork currently provides automatic NATTEN installation only "
+            "for Linux x86_64."
+        )
+    if sys.version_info[:2] not in {(3, 9), (3, 10), (3, 11), (3, 12)}:
+        raise RuntimeError(
+            "The supported NATTEN wheels require Python 3.9-3.12; found "
+            f"{sys.version_info.major}.{sys.version_info.minor}."
+        )
+
+    natten_version = NATTEN_BUILDS.get((torch_series, cuda_version))
+    if natten_version is None:
+        supported = ", ".join(
+            f"Torch {torch_key} / CUDA {cuda_key}"
+            for torch_key, cuda_key in NATTEN_BUILDS
+        )
+        raise RuntimeError(
+            f"No tested NATTEN build is configured for torch=={torch.__version__} "
+            f"with CUDA {cuda_version}. Supported environments: {supported}."
+        )
+
+    try:
+        installed_version = importlib.metadata.version("natten")
+    except importlib.metadata.PackageNotFoundError:
+        installed_version = None
+
+    if installed_version == natten_version:
+        print(f"[PMRF] NATTEN {installed_version} is already installed.")
+        return
+
+    print(f"[PMRF] Installing NATTEN {natten_version}...")
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--force-reinstall",
+            f"natten=={natten_version}",
+            "--find-links",
+            NATTEN_WHEEL_INDEX,
+        ]
+    )
+
+
+ensure_models()
+patch_basicsr()
+ensure_natten()
